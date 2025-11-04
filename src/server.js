@@ -7,13 +7,37 @@ import { aiEnabled, rerankFilesWithAI } from './ai.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
+// Enable OAuth installer if client credentials are present
+const useOAuth = Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET && process.env.SLACK_STATE_SECRET);
+
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  endpoints: '/slack/events'
+  endpoints: '/slack/events',
+  ...(useOAuth
+    ? {
+        clientId: process.env.SLACK_CLIENT_ID,
+        clientSecret: process.env.SLACK_CLIENT_SECRET,
+        stateSecret: process.env.SLACK_STATE_SECRET,
+        scopes: [
+          'commands',
+          'chat:write',
+          'files:read',
+          'im:read',
+          'im:write',
+          'im:history',
+          'users:read'
+        ],
+        installerOptions: {
+          directInstall: true,
+          installPath: '/slack/install',
+          redirectUriPath: '/slack/oauth_redirect'
+        }
+      }
+    : {})
 });
 
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
+  ...(useOAuth ? {} : { token: process.env.SLACK_BOT_TOKEN }),
   receiver
 });
 
@@ -231,8 +255,9 @@ app.view('upload_design_modal', async ({ ack, view, client, body, logger: boltLo
       const slackFile = info.file;
 
       // Download file with bot token
+      const authToken = client?.token || process.env.SLACK_BOT_TOKEN;
       const res = await fetch(slackFile.url_private, {
-        headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` }
+        headers: { Authorization: `Bearer ${authToken}` }
       });
       if (!res.ok) throw new Error('Failed to download file from Slack');
       const buf = Buffer.from(await res.arrayBuffer());
