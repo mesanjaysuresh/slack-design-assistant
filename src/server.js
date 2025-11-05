@@ -2,7 +2,7 @@ import 'dotenv/config';
 import bolt from '@slack/bolt';
 const { App, ExpressReceiver } = bolt;
 import pino from 'pino';
-import { supabase, getOrCreateWorkspace, searchFiles, uploadFileToStorage, saveUploadedFileMetadata } from './supabase.js';
+import { supabase, getOrCreateWorkspace, searchFiles, uploadFileToStorage, saveUploadedFileMetadata, storeSlackInstallation, fetchSlackInstallation, deleteSlackInstallation } from './supabase.js';
 import { aiEnabled, rerankFilesWithAI } from './ai.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -27,6 +27,17 @@ const receiver = new ExpressReceiver({
           'im:history',
           'users:read'
         ],
+        installationStore: {
+          storeInstallation: async (installation) => {
+            await storeSlackInstallation(installation);
+          },
+          fetchInstallation: async (query) => {
+            return await fetchSlackInstallation(query);
+          },
+          deleteInstallation: async (query) => {
+            await deleteSlackInstallation(query);
+          }
+        },
         installerOptions: {
           directInstall: true,
           installPath: '/slack/install',

@@ -168,3 +168,54 @@ export async function saveUploadedFileMetadata({
   const { error } = await supabase.from('files').insert(payload);
   if (error) throw error;
 }
+
+// ----------------------------
+// OAuth Installation Store API
+// ----------------------------
+
+// Persist a Slack installation (bot/user tokens, team info)
+export async function storeSlackInstallation(installation) {
+  const team_id = installation.team?.id || null;
+  const enterprise_id = installation.enterprise?.id || null;
+  const is_enterprise = Boolean(installation.isEnterpriseInstall);
+  const user_id = installation.user?.id || null;
+
+  // Upsert by team_id/enterprise_id to avoid duplicates
+  const { error } = await supabase
+    .from('installations')
+    .upsert(
+      [{ team_id, enterprise_id, is_enterprise, user_id, data: installation }],
+      { onConflict: 'team_id' }
+    );
+  if (error) throw error;
+}
+
+// Fetch an installation for a workspace or enterprise
+export async function fetchSlackInstallation({ teamId, enterpriseId, isEnterpriseInstall }) {
+  const query = supabase
+    .from('installations')
+    .select('data')
+    .limit(1);
+
+  if (isEnterpriseInstall && enterpriseId) {
+    const { data, error } = await query.eq('enterprise_id', enterpriseId).maybeSingle();
+    if (error) throw error;
+    return data?.data || null;
+  } else if (teamId) {
+    const { data, error } = await query.eq('team_id', teamId).maybeSingle();
+    if (error) throw error;
+    return data?.data || null;
+  }
+  return null;
+}
+
+// Delete an installation (on app uninstall)
+export async function deleteSlackInstallation({ teamId, enterpriseId, isEnterpriseInstall }) {
+  let del;
+  if (isEnterpriseInstall && enterpriseId) {
+    del = await supabase.from('installations').delete().eq('enterprise_id', enterpriseId);
+  } else if (teamId) {
+    del = await supabase.from('installations').delete().eq('team_id', teamId);
+  }
+  if (del?.error) throw del.error;
+}
