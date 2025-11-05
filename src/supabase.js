@@ -181,11 +181,12 @@ export async function storeSlackInstallation(installation) {
   const user_id = installation.user?.id || null;
 
   // Upsert by team_id/enterprise_id to avoid duplicates
+  const conflictTarget = is_enterprise ? 'enterprise_id' : 'team_id';
   const { error } = await supabase
     .from('installations')
     .upsert(
       [{ team_id, enterprise_id, is_enterprise, user_id, data: installation }],
-      { onConflict: 'team_id' }
+      { onConflict: conflictTarget }
     );
   if (error) throw error;
 }
