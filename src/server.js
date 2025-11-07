@@ -273,8 +273,8 @@ app.view('upload_design_modal', async ({ ack, view, client, body, logger: boltLo
       if (!res.ok) throw new Error('Failed to download file from Slack');
       const buf = Buffer.from(await res.arrayBuffer());
 
-      // Upload to Supabase storage
-      const stored = await uploadFileToStorage(buf, slackFile.name || fileName);
+      // Upload to Supabase storage (workspace-scoped)
+      const stored = await uploadFileToStorage(buf, slackFile.name || fileName, workspace.id);
       finalFileUrl = stored.url;
     } else if (fileUrlInput) {
       // Use provided URL directly
@@ -282,9 +282,10 @@ app.view('upload_design_modal', async ({ ack, view, client, body, logger: boltLo
       slackFileId = null;
     }
 
-    // Save metadata compatible with retrieval
+    // Save metadata compatible with retrieval (workspace-scoped)
     await saveUploadedFileMetadata({
       workspace_id: workspace.id,
+      team_id: teamId, // Store team_id for direct filtering
       user_id: body.user?.id,
       file_name: fileName,
       tags: tags || null,

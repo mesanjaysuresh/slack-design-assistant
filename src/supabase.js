@@ -37,18 +37,31 @@ export async function getOrCreateWorkspace(teamId, teamName) {
   return data;
 }
 
+/**
+ * Validate workspace scope - prevents cross-workspace access
+ */
+function validateWorkspaceScope(workspaceId, operation) {
+  if (!workspaceId) {
+    throw new Error(`PRIVACY ERROR: ${operation} requires workspaceId to prevent cross-workspace access`);
+  }
+}
+
 export async function searchFiles(queryText, workspaceId, limit = 10) {
+  // CRITICAL: Always validate workspace scope for privacy
+  validateWorkspaceScope(workspaceId, 'searchFiles');
+
   const tokens = normalizeAndTokenize(queryText);
   const primary = tokens.slice().sort((a, b) => b.length - a.length)[0] || '';
 
   // 1) Prefer a DB-side filter on safe text columns using the strongest token
+  // ALWAYS filtered by workspace_id - no cross-workspace queries
   let rows = [];
   if (primary) {
     const q = `%${primary}%`;
     const filtered = await supabase
       .from('files')
       .select('*')
-      .eq('workspace_id', workspaceId)
+      .eq('workspace_id', workspaceId) // CRITICAL: workspace isolation
       .or(`file_name.ilike.${q},name.ilike.${q},description.ilike.${q},project.ilike.${q},tags_text.ilike.${q}`)
       .order('uploaded_at', { ascending: false })
       .limit(200);
@@ -57,19 +70,17 @@ export async function searchFiles(queryText, workspaceId, limit = 10) {
   }
 
   // 2) If nothing found (or no primary token), fetch recent workspace rows as fallback candidates
+  // STILL filtered by workspace_id - no legacy fallback
   if (!rows.length) {
     const scoped = await supabase
       .from('files')
       .select('*')
-      .eq('workspace_id', workspaceId)
+      .eq('workspace_id', workspaceId) // CRITICAL: workspace isolation
       .order('uploaded_at', { ascending: false })
       .limit(200);
     if (scoped.error) throw scoped.error;
     rows = scoped.data ?? [];
   }
-
-  // 3) Potential cross-workspace legacy fallback: only if we get no positive scores later
-  let legacyRows = [];
 
   // Score candidates locally across name, description, project, and tags (array or text)
   const scoreList = (arr) => arr.map(r => {
@@ -91,36 +102,27 @@ export async function searchFiles(queryText, workspaceId, limit = 10) {
     return { row: r, score };
   });
 
-  const scoredPrimary = scoreList(rows).filter(x => x.score > 0);
-  let scoredLegacy = [];
-  if (!scoredPrimary.length) {
-    // fetch legacy set lazily only when needed
-    const legacy = await supabase
-      .from('files')
-      .select('*')
-      .order('uploaded_at', { ascending: false })
-      .limit(200);
-    if (legacy.error) throw legacy.error;
-    legacyRows = legacy.data ?? [];
-    scoredLegacy = scoreList(legacyRows).filter(x => x.score > 0);
-  }
+  const scored = scoreList(rows).filter(x => x.score > 0);
 
-  // If no positive matches at all, return empty to let caller message "no results"
-  const positives = scoredPrimary.length ? scoredPrimary : scoredLegacy;
-  if (!positives.length) {
+  // If no positive matches, return empty (no cross-workspace fallback)
+  if (!scored.length) {
     return [];
   }
 
-  const result = positives
+  const result = scored
     .sort((a, b) => b.score - a.score)
     .map(x => x.row);
   return result.slice(0, limit);
 }
 
 // Upload a file buffer to Supabase storage and return a public URL
-export async function uploadFileToStorage(fileBuffer, fileName) {
+// Files are stored in workspace-specific folders for isolation
+export async function uploadFileToStorage(fileBuffer, fileName, workspaceId) {
+  validateWorkspaceScope(workspaceId, 'uploadFileToStorage');
+
   const safeName = String(fileName || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_');
-  const filePath = `${Date.now()}_${safeName}`;
+  // Store in workspace-specific folder: workspace_id/timestamp_filename
+  const filePath = `${workspaceId}/${Date.now()}_${safeName}`;
 
   const { error: uploadError } = await supabase.storage
     .from('design_files')
@@ -138,8 +140,10 @@ export async function uploadFileToStorage(fileBuffer, fileName) {
 }
 
 // Save uploaded file metadata to the existing files table schema used by retrieval
+// PRIVACY: Always requires workspace_id to ensure tenant isolation
 export async function saveUploadedFileMetadata({
   workspace_id,
+  team_id,
   user_id,
   file_name,
   tags,
@@ -147,11 +151,14 @@ export async function saveUploadedFileMetadata({
   file_url,
   slack_file_id
 }) {
+  validateWorkspaceScope(workspace_id, 'saveUploadedFileMetadata');
+
   const tagsText = Array.isArray(tags)
     ? tags.map(x => String(x)).join(' ')
     : String(tags || '') || null;
   const payload = {
     workspace_id,
+    team_id: team_id || null, // Store team_id for direct filtering if needed
     user_id,
     file_name,
     // Backward-compat for older schema
