@@ -20,6 +20,7 @@ function normalizeAndTokenize(queryText) {
   return tokens.length ? tokens : all; // fallback to all tokens if everything filtered
 }
 
+// Create or get workspace - supports unlimited workspaces (no installation limits)
 export async function getOrCreateWorkspace(teamId, teamName) {
   const { data: existing, error: fetchError } = await supabase
     .from('workspaces')
@@ -178,52 +179,84 @@ export async function saveUploadedFileMetadata({
 
 // ----------------------------
 // OAuth Installation Store API
+// Supports unlimited installations - any number of workspaces can install
 // ----------------------------
 
 // Persist a Slack installation (bot/user tokens, team info)
+// No installation limits - supports unlimited workspaces
 export async function storeSlackInstallation(installation) {
-  const team_id = installation.team?.id || null;
-  const enterprise_id = installation.enterprise?.id || null;
-  const is_enterprise = Boolean(installation.isEnterpriseInstall);
-  const user_id = installation.user?.id || null;
+  try {
+    const team_id = installation.team?.id || null;
+    const enterprise_id = installation.enterprise?.id || null;
+    const is_enterprise = Boolean(installation.isEnterpriseInstall);
+    const user_id = installation.user?.id || null;
 
-  // Upsert by team_id/enterprise_id to avoid duplicates
-  const conflictTarget = is_enterprise ? 'enterprise_id' : 'team_id';
-  const { error } = await supabase
-    .from('installations')
-    .upsert(
-      [{ team_id, enterprise_id, is_enterprise, user_id, data: installation }],
-      { onConflict: conflictTarget }
-    );
-  if (error) throw error;
+    // Upsert by team_id/enterprise_id to avoid duplicates
+    // Each workspace can have one installation record, but unlimited workspaces can install
+    const conflictTarget = is_enterprise ? 'enterprise_id' : 'team_id';
+    const { error } = await supabase
+      .from('installations')
+      .upsert(
+        [{ team_id, enterprise_id, is_enterprise, user_id, data: installation }],
+        { onConflict: conflictTarget }
+      );
+    if (error) {
+      console.error('[storeSlackInstallation] Supabase error:', error);
+      throw error;
+    }
+  } catch (err) {
+    console.error('[storeSlackInstallation] Failed to store installation:', err.message);
+    throw err;
+  }
 }
 
 // Fetch an installation for a workspace or enterprise
 export async function fetchSlackInstallation({ teamId, enterpriseId, isEnterpriseInstall }) {
-  const query = supabase
-    .from('installations')
-    .select('data')
-    .limit(1);
+  try {
+    const query = supabase
+      .from('installations')
+      .select('data')
+      .limit(1);
 
-  if (isEnterpriseInstall && enterpriseId) {
-    const { data, error } = await query.eq('enterprise_id', enterpriseId).maybeSingle();
-    if (error) throw error;
-    return data?.data || null;
-  } else if (teamId) {
-    const { data, error } = await query.eq('team_id', teamId).maybeSingle();
-    if (error) throw error;
-    return data?.data || null;
+    if (isEnterpriseInstall && enterpriseId) {
+      const { data, error } = await query.eq('enterprise_id', enterpriseId).maybeSingle();
+      if (error) {
+        console.error('[fetchSlackInstallation] Supabase error (enterprise):', error);
+        throw error;
+      }
+      return data?.data || null;
+    } else if (teamId) {
+      const { data, error } = await query.eq('team_id', teamId).maybeSingle();
+      if (error) {
+        console.error('[fetchSlackInstallation] Supabase error (team):', error);
+        throw error;
+      }
+      return data?.data || null;
+    }
+    return null;
+  } catch (err) {
+    console.error('[fetchSlackInstallation] Failed to fetch installation:', err.message);
+    // Return null instead of throwing to allow OAuth flow to continue
+    // The OAuth library will handle missing installations
+    return null;
   }
-  return null;
 }
 
 // Delete an installation (on app uninstall)
 export async function deleteSlackInstallation({ teamId, enterpriseId, isEnterpriseInstall }) {
-  let del;
-  if (isEnterpriseInstall && enterpriseId) {
-    del = await supabase.from('installations').delete().eq('enterprise_id', enterpriseId);
-  } else if (teamId) {
-    del = await supabase.from('installations').delete().eq('team_id', teamId);
+  try {
+    let del;
+    if (isEnterpriseInstall && enterpriseId) {
+      del = await supabase.from('installations').delete().eq('enterprise_id', enterpriseId);
+    } else if (teamId) {
+      del = await supabase.from('installations').delete().eq('team_id', teamId);
+    }
+    if (del?.error) {
+      console.error('[deleteSlackInstallation] Supabase error:', del.error);
+      throw del.error;
+    }
+  } catch (err) {
+    console.error('[deleteSlackInstallation] Failed to delete installation:', err.message);
+    throw err;
   }
-  if (del?.error) throw del.error;
 }

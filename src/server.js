@@ -7,6 +7,53 @@ import { aiEnabled, rerankFilesWithAI } from './ai.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
+// Check Node.js version (fetch requires Node 18+)
+const nodeVersion = process.version;
+const majorVersion = parseInt(nodeVersion.slice(1).split('.')[0]);
+if (majorVersion < 18) {
+  logger.error({ nodeVersion }, 'Node.js 18+ is required for fetch API. Current version:', nodeVersion);
+  process.exit(1);
+}
+
+// Validate required environment variables
+function validateEnv() {
+  const required = ['SLACK_SIGNING_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    logger.error({ missing }, 'Missing required environment variables');
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+
+  // Validate OAuth variables if OAuth is enabled
+  const useOAuth = Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET && process.env.SLACK_STATE_SECRET);
+  if (useOAuth) {
+    logger.info('OAuth mode enabled');
+    const oauthRequired = ['SLACK_CLIENT_ID', 'SLACK_CLIENT_SECRET', 'SLACK_STATE_SECRET'];
+    const oauthMissing = oauthRequired.filter(key => !process.env[key]);
+    if (oauthMissing.length > 0) {
+      logger.warn({ oauthMissing }, 'OAuth credentials incomplete, OAuth may not work properly');
+    }
+  } else {
+    logger.info('OAuth mode disabled, using bot token');
+    if (!process.env.SLACK_BOT_TOKEN) {
+      logger.warn('SLACK_BOT_TOKEN not set, app may not function properly');
+    }
+  }
+
+  // Validate Supabase variables
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    logger.warn('Supabase credentials not set, database operations will fail');
+  }
+}
+
+try {
+  validateEnv();
+} catch (err) {
+  logger.error({ err }, 'Environment validation failed');
+  process.exit(1);
+}
+
 // Enable OAuth installer if client credentials are present
 const useOAuth = Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET && process.env.SLACK_STATE_SECRET);
 
@@ -29,19 +76,51 @@ const receiver = new ExpressReceiver({
         ],
         installationStore: {
           storeInstallation: async (installation) => {
-            await storeSlackInstallation(installation);
+            try {
+              logger.info({ teamId: installation.team?.id }, 'Storing Slack installation');
+              await storeSlackInstallation(installation);
+              logger.info({ teamId: installation.team?.id }, 'Successfully stored installation');
+            } catch (err) {
+              logger.error({ err, teamId: installation.team?.id }, 'Failed to store installation');
+              throw err;
+            }
           },
           fetchInstallation: async (query) => {
-            return await fetchSlackInstallation(query);
+            try {
+              logger.debug({ query }, 'Fetching Slack installation');
+              const installation = await fetchSlackInstallation(query);
+              if (installation) {
+                logger.debug({ teamId: query.teamId }, 'Installation found');
+              } else {
+                logger.debug({ teamId: query.teamId }, 'Installation not found');
+              }
+              return installation;
+            } catch (err) {
+              logger.error({ err, query }, 'Failed to fetch installation');
+              // Return null to allow OAuth flow to continue
+              return null;
+            }
           },
           deleteInstallation: async (query) => {
-            await deleteSlackInstallation(query);
+            try {
+              logger.info({ query }, 'Deleting Slack installation');
+              await deleteSlackInstallation(query);
+              logger.info({ query }, 'Successfully deleted installation');
+            } catch (err) {
+              logger.error({ err, query }, 'Failed to delete installation');
+              throw err;
+            }
           }
         },
         installerOptions: {
+          // Allow unlimited installations - any workspace can install the app
           directInstall: true,
+          // No installation limits - supports unlimited workspaces
           installPath: '/slack/install',
-          redirectUriPath: '/slack/oauth_redirect'
+          redirectUriPath: '/slack/oauth_redirect',
+          // Enable installation for all workspaces (no restrictions)
+          userScopes: [],
+          // Bot scopes are defined above in the scopes array
         }
       }
     : {})
@@ -310,5 +389,40 @@ app.view('upload_design_modal', async ({ ack, view, client, body, logger: boltLo
   }
 });
 
+// Add error handler for OAuth redirect failures
+receiver.app.use((err, req, res, next) => {
+  if (req.path === '/slack/oauth_redirect') {
+    logger.error({ err, path: req.path, query: req.query }, 'OAuth redirect error');
+    res.status(500).send(`
+      <html>
+        <head><title>Installation Error</title></head>
+        <body>
+          <h1>Oops, Something Went Wrong!</h1>
+          <p>Please try again or contact the app owner.</p>
+          <p><strong>Error:</strong> ${err.message || 'Unknown error'}</p>
+          <p><a href="/slack/install">Try installing again</a></p>
+        </body>
+      </html>
+    `);
+  } else {
+    next(err);
+  }
+});
+
+// Global error handlers for unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error({ reason, promise }, 'Unhandled Promise Rejection');
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught Exception');
+  process.exit(1);
+});
+
 const port = process.env.PORT || 3000;
-app.start(port).then(() => logger.info(`Slack app listening on :${port}`));
+app.start(port).then(() => {
+  logger.info({ port, nodeVersion: process.version }, `Slack app listening on :${port}`);
+}).catch((err) => {
+  logger.error({ err }, 'Failed to start app');
+  process.exit(1);
+});
